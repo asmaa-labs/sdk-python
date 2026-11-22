@@ -20,6 +20,8 @@ from typing import Any
 import httpcore2
 import httpx2
 
+from ._proxy import Proxy
+
 IO_DEADLINE: ContextVar[float | None] = ContextVar("proofline_io_deadline", default=None)
 
 
@@ -128,6 +130,9 @@ def mapped_errors() -> Iterator[None]:
         yield
     except httpcore2.TimeoutException:
         raise httpx2.ReadTimeout("The request deadline expired.") from None
+    except httpcore2.ProxyError as error:
+        # The message is the proxy's status line, such as "407 Proxy Authentication Required".
+        raise httpx2.ProxyError(str(error)) from None
     except (httpcore2.NetworkError, httpcore2.ProtocolError):
         raise httpx2.TransportError("The HTTP transport failed.") from None
 
@@ -146,14 +151,29 @@ class ResponseStream(httpx2.SyncByteStream):
 
 
 class Transport(httpx2.BaseTransport):
-    def __init__(self) -> None:
-        self._pool = httpcore2.ConnectionPool(
-            ssl_context=httpcore2.default_ssl_context(),
-            network_backend=NetworkBackend(),
-            max_connections=100,
-            max_keepalive_connections=20,
-            keepalive_expiry=5,
-        )
+    def __init__(self, proxy: Proxy | None = None) -> None:
+        if proxy is None:
+            self._pool = httpcore2.ConnectionPool(
+                ssl_context=httpcore2.default_ssl_context(),
+                network_backend=NetworkBackend(),
+                max_connections=100,
+                max_keepalive_connections=20,
+                keepalive_expiry=5,
+            )
+        else:
+            # CONNECT carries the origin's host name, so the proxy resolves it, and the
+            # bounded backend still limits the proxy connection, the tunnel and TLS.
+            auth = proxy.auth
+            self._pool = httpcore2.HTTPProxy(
+                proxy_url=proxy.url,
+                # httpcore accepts only ASCII text here; bytes keep UTF-8 credentials.
+                proxy_auth=None if auth is None else (auth[0].encode(), auth[1].encode()),
+                ssl_context=httpcore2.default_ssl_context(),
+                network_backend=NetworkBackend(),
+                max_connections=100,
+                max_keepalive_connections=20,
+                keepalive_expiry=5,
+            )
 
     def handle_request(self, request: httpx2.Request) -> httpx2.Response:
         if not isinstance(request.stream, httpx2.SyncByteStream):

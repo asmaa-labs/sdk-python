@@ -7,7 +7,7 @@ from typing import Any, NotRequired, TypedDict, cast
 
 import httpx2
 
-from ._transport import ProoflineError
+from ._transport import ProoflineError, proxy_refused
 
 PROTOCOL = "2025-11-25"
 
@@ -128,6 +128,8 @@ class McpTools:
                 headers["MCP-Protocol-Version"] = PROTOCOL
             try:
                 response = self._http.post("/mcp", content=data, headers=headers)
+            except httpx2.ProxyError as error:
+                raise proxy_refused(error) from None
             except httpx2.HTTPError:
                 raise ProoflineError(
                     0, "urn:proofline:sdk:transport", "MCP transport failed."
@@ -177,6 +179,8 @@ class AsyncMcpTools:
                 headers["MCP-Protocol-Version"] = PROTOCOL
             try:
                 response = await self._http.post("/mcp", content=data, headers=headers)
+            except httpx2.ProxyError as error:
+                raise proxy_refused(error) from None
             except httpx2.HTTPError:
                 raise ProoflineError(
                     0, "urn:proofline:sdk:transport", "MCP transport failed."

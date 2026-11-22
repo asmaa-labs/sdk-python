@@ -20,6 +20,19 @@ with ProoflineClient(os.environ["PROOFLINE_TOKEN"]) as client:
 
 When no token is passed, the clients read `PROOFLINE_TOKEN` from the environment, keep the token in memory, and redact it from diagnostic output. `AsyncProoflineClient` exposes the same methods as coroutines that you call with `await`. The [SDK guide](https://proofline.sh/docs/sdks/) and [API reference](https://proofline.sh/docs/api/) cover every operation.
 
+## Proxies
+
+Both clients send their requests through an HTTP proxy when `proxy` names one, or when the environment does: `HTTPS_PROXY`, else `ALL_PROXY`, unless `NO_PROXY` matches the origin's host. These are the variables, order and `NO_PROXY` rules of the Proofline CLI, so a CI job configured for the CLI configures the SDK the same way. An uppercase name takes precedence over its lowercase spelling. `HTTP_PROXY`, which names a proxy for plain HTTP, is never used.
+
+```python
+with ProoflineClient(proxy="http://proxy.internal:3128") as client:
+    ...
+```
+
+The client asks the proxy to `CONNECT` to the origin's host and port and starts TLS with the origin inside that tunnel, verifying the origin's certificate as it does without a proxy. Only the host and port reach the proxy in the clear; the token and every request and response stay inside TLS. The proxy resolves the host name. Credentials in the proxy URL, such as `http://user:password@proxy.internal:3128` with reserved characters percent-encoded, go only to the proxy and never appear in errors. A URL without a scheme names an HTTP proxy, and the client verifies an `https://` proxy's certificate the way it verifies the origin's.
+
+`NO_PROXY` lists host names, IP addresses and CIDR ranges separated by commas. A name matches itself and its subdomains, with or without a leading dot, and `*` matches every host. An explicit `proxy` ignores `NO_PROXY`. A proxy setting the client cannot use, such as a SOCKS proxy, raises `ValueError` when the client is created instead of becoming a direct connection; add the origin's host to `NO_PROXY` to connect without the proxy. A proxy that refuses the tunnel raises `ProoflineError` with the type `urn:proofline:sdk:proxy-refused`, and its `detail` names the proxy's HTTP status. Plain-HTTP origins, which the clients accept only on a loopback address, never use a proxy.
+
 ## Errors and refusals
 
 A refused request raises `ProoflineError` with the server problem's `status`, `type`, `title` and `detail`. When a review request creates nothing, the error also carries `refusal`, whose `reason` names the setting to change, such as `NO_LINKED_ENVIRONMENT` or `ENVIRONMENT_NOT_READY`, and `repository_name`. `RunNowRefusal` names the type of `refusal`. A refusal that does not match the public contract keeps its status, `title` and `detail` with the type `urn:proofline:sdk:invalid-response` and no `refusal`. Any other status, such as the 402 a review request answers when credits cannot pay, is a plain problem with no `refusal`. The token is redacted from every text field, and `repr` and `str` show only the status.

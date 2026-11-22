@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import ssl
 import threading
 import time
 from collections.abc import Callable
@@ -34,7 +35,11 @@ class Reply:
 
 
 class Server(AbstractContextManager["Server"]):
-    def __init__(self, respond: Callable[[Request, int], Reply]) -> None:
+    """Serves plain HTTP, or HTTPS with the `tls` server context."""
+
+    def __init__(
+        self, respond: Callable[[Request, int], Reply], *, tls: ssl.SSLContext | None = None
+    ) -> None:
         self.requests: list[Request] = []
         self._lock = threading.Lock()
         owner = self
@@ -93,10 +98,16 @@ class Server(AbstractContextManager["Server"]):
 
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self._server.daemon_threads = True
+        if tls is not None:
+            # Each handler thread, not the accepting thread, completes its handshake.
+            self._server.socket = tls.wrap_socket(
+                self._server.socket, server_side=True, do_handshake_on_connect=False
+            )
         self._thread = threading.Thread(
             target=self._server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True
         )
-        self.url = f"http://127.0.0.1:{self._server.server_port}"
+        self.port = self._server.server_port
+        self.url = f"{'http' if tls is None else 'https'}://127.0.0.1:{self.port}"
 
     def __enter__(self) -> Self:
         self._thread.start()
