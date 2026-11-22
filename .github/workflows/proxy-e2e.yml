@@ -1,0 +1,100 @@
+name: Proxy-only network
+# A user whose traffic can only reach loopback calls the real Proofline API, so the
+# only route out is a local tinyproxy. The released SDK, this branch's SDK and the
+# CLI each get the same HTTPS_PROXY.
+on:
+  push:
+    branches: [proxy-e2e]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  proxy-only:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      PROOFLINE_TOKEN: ${{ secrets.PROOFLINE_TOKEN }}
+      PROOFLINE_ORGANIZATION_ID: ${{ vars.PROOFLINE_ORGANIZATION_ID }}
+      PROOFLINE_NO_UPDATE_CHECK: "1"
+      PROXY: http://127.0.0.1:8888
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.13.12'
+      - name: Check the credentials are configured
+        run: |
+          test -n "$PROOFLINE_TOKEN" || { echo "::error::Set the PROOFLINE_TOKEN secret"; exit 1; }
+          test -n "$PROOFLINE_ORGANIZATION_ID" || { echo "::error::Set the PROOFLINE_ORGANIZATION_ID variable"; exit 1; }
+      - name: Install the released SDK, this branch's SDK, the CLI and tinyproxy
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq tinyproxy
+          sudo install -d -o "$USER" /opt/e2e
+          python -m venv /opt/e2e/released
+          /opt/e2e/released/bin/pip install -q proofline-sdk
+          python -m venv /opt/e2e/branch
+          /opt/e2e/branch/bin/pip install -q .
+          cp e2e/proxy_only_network.py /opt/e2e/
+          curl -fsSL https://proofline.sh/cli | PROOFLINE_INSTALL_DIR=/opt/e2e/bin sh
+          chmod -R a+rX /opt/e2e
+          /opt/e2e/released/bin/pip show proofline-sdk | head -2
+          /opt/e2e/bin/proofline --version
+      - name: Start tinyproxy as the only route out
+        run: |
+          sudo systemctl stop tinyproxy || true
+          printf '%s\n' 'User tinyproxy' 'Group tinyproxy' 'Port 8888' 'Listen 127.0.0.1' \
+            'Timeout 120' 'LogLevel Connect' 'LogFile "/var/log/tinyproxy/e2e.log"' \
+            'Allow 127.0.0.1' 'ConnectPort 443' | sudo tee /etc/tinyproxy/e2e.conf
+          sudo install -d -o tinyproxy -g tinyproxy /var/log/tinyproxy
+          sudo tinyproxy -c /etc/tinyproxy/e2e.conf
+          for attempt in $(seq 20); do nc -z 127.0.0.1 8888 && break; sleep 0.5; done
+          sudo useradd --create-home --shell /bin/bash sandboxed
+          for table in iptables ip6tables; do
+            sudo "$table" -A OUTPUT -o lo -m owner --uid-owner sandboxed -j ACCEPT
+            sudo "$table" -A OUTPUT -m owner --uid-owner sandboxed -j REJECT
+          done
+      - name: The sandboxed user reaches Proofline only through the proxy
+        run: |
+          as_sandboxed() {
+            sudo -u sandboxed --preserve-env=HTTPS_PROXY,PROOFLINE_TOKEN,PROOFLINE_ORGANIZATION_ID,PROOFLINE_NO_UPDATE_CHECK "$@"
+          }
+          if as_sandboxed curl -sS --max-time 10 --noproxy '*' -o /dev/null https://proofline.sh/; then
+            echo "::error::The sandboxed user reached Proofline without the proxy"
+            exit 1
+          fi
+          HTTPS_PROXY=$PROXY as_sandboxed curl -sS --max-time 30 -o /dev/null \
+            -w 'curl through the proxy: HTTP %{http_code}\n' https://proofline.sh/
+      - name: The released SDK ignores HTTPS_PROXY
+        run: |
+          set +e
+          output=$(HTTPS_PROXY=$PROXY sudo -u sandboxed \
+            --preserve-env=HTTPS_PROXY,PROOFLINE_TOKEN,PROOFLINE_ORGANIZATION_ID \
+            /opt/e2e/released/bin/python -I /opt/e2e/proxy_only_network.py 2>&1)
+          status=$?
+          set -e
+          echo "$output"
+          test "$status" -ne 0
+          grep -q 'urn:proofline:sdk:transport-unavailable' <<<"$output"
+      - name: This branch's SDK tunnels through HTTPS_PROXY
+        run: |
+          HTTPS_PROXY=$PROXY sudo -u sandboxed \
+            --preserve-env=HTTPS_PROXY,PROOFLINE_TOKEN,PROOFLINE_ORGANIZATION_ID \
+            /opt/e2e/branch/bin/python -I /opt/e2e/proxy_only_network.py
+      - name: The CLI tunnels through the same HTTPS_PROXY
+        run: |
+          HTTPS_PROXY=$PROXY sudo -u sandboxed \
+            --preserve-env=HTTPS_PROXY,PROOFLINE_TOKEN,PROOFLINE_ORGANIZATION_ID,PROOFLINE_NO_UPDATE_CHECK \
+            /opt/e2e/bin/proofline reviews > "$RUNNER_TEMP/reviews.json"
+          python - "$RUNNER_TEMP/reviews.json" <<'PY'
+          import json, sys
+          page = json.load(open(sys.argv[1]))
+          print(f"CLI: read a page of {len(page.get('items', []))} reviews")
+          PY
+      - name: What the proxy saw
+        if: always()
+        run: |
+          sudo grep -i 'connect' /var/log/tinyproxy/e2e.log || true
+          sudo grep -q 'proofline.sh:443' /var/log/tinyproxy/e2e.log
