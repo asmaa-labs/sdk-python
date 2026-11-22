@@ -35,6 +35,7 @@ from ._generated.models import (
     RunNowRefused,
 )
 from ._generated.types import Unset
+from ._proxy import Proxy
 from ._sync_http import IO_DEADLINE
 from ._sync_http import Transport as SyncHTTPTransport
 
@@ -65,6 +66,7 @@ RunNowRefusal: TypeAlias = (
     | RunNowRefusalViewType9
 )
 DEADLINE: ContextVar[float | None] = ContextVar("proofline_request_deadline", default=None)
+PROXY_STATUS = re.compile(r"([1-5][0-9]{2})(?![0-9])", re.ASCII)
 
 
 class BearerAuth(httpx2.Auth):
@@ -156,8 +158,22 @@ def invalid_response() -> ProoflineError:
 def network_error(error: httpx2.HTTPError) -> ProoflineError:
     if isinstance(error, httpx2.TimeoutException):
         return timeout_error()
+    if isinstance(error, httpx2.ProxyError):
+        return proxy_refused(error)
     return ProoflineError(
         0, "urn:proofline:sdk:transport-unavailable", "Could not reach the Proofline API."
+    )
+
+
+def proxy_refused(error: httpx2.ProxyError) -> ProoflineError:
+    """The proxy answered CONNECT without a tunnel, so the request never left it."""
+    # httpcore names the refusal with the proxy's status line; only its code is kept.
+    status = PROXY_STATUS.match(str(error))
+    shown = f" (HTTP {status[1]})" if status else ""
+    return ProoflineError(
+        0,
+        "urn:proofline:sdk:proxy-refused",
+        f"The proxy refused to open a tunnel to the Proofline API{shown}.",
     )
 
 
@@ -433,10 +449,10 @@ class AsyncDeadlineStream(httpx2.AsyncByteStream):
 
 
 class RetryTransport(httpx2.BaseTransport):
-    def __init__(self, token: SecretStr, timeout: float) -> None:
+    def __init__(self, token: SecretStr, timeout: float, proxy: Proxy | None = None) -> None:
         self._token = token
         self._timeout = timeout
-        self._inner = SyncHTTPTransport()
+        self._inner = SyncHTTPTransport(proxy)
 
     def handle_request(self, request: httpx2.Request) -> httpx2.Response:
         for attempt in range(4):
@@ -484,10 +500,12 @@ class RetryTransport(httpx2.BaseTransport):
 
 
 class AsyncRetryTransport(httpx2.AsyncBaseTransport):
-    def __init__(self, token: SecretStr, timeout: float) -> None:
+    def __init__(self, token: SecretStr, timeout: float, proxy: Proxy | None = None) -> None:
         self._token = token
         self._timeout = timeout
-        self._inner = httpx2.AsyncHTTPTransport()
+        self._inner = httpx2.AsyncHTTPTransport(
+            proxy=None if proxy is None else httpx2.Proxy(proxy.url, auth=proxy.auth)
+        )
 
     async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
         for attempt in range(4):

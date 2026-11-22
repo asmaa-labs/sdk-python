@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import os
 from asyncio import sleep as async_sleep
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from string import hexdigits
@@ -15,7 +16,7 @@ from uuid import UUID
 import httpx2
 from pydantic import SecretStr
 
-from . import _transport
+from . import _proxy, _transport
 from ._generated.api.default import (
     get_agent_session,
     get_agent_session_prompt,
@@ -213,6 +214,9 @@ class ProoflineClient(Operations):
 
     Name resolution, connection, TLS and socket operations stop at the configured
     HTTP timeout and at a wait deadline.
+
+    proxy names the HTTP proxy that tunnels every HTTPS request. Without it,
+    HTTPS_PROXY, ALL_PROXY and NO_PROXY choose one as they do for the Proofline CLI.
     """
 
     def __init__(
@@ -221,9 +225,11 @@ class ProoflineClient(Operations):
         *,
         base_url: str = "https://proofline.sh",
         timeout: float = 30,
+        proxy: str | None = None,
     ) -> None:
         self._api = _configuration(token, base_url, timeout)
         self._base_url = _transport.base_url(base_url)
+        tunnel = _proxy.select(proxy, self._base_url, os.environ)
         self._http = httpx2.Client(
             base_url=self._base_url,
             auth=_transport.BearerAuth(self._api.token),
@@ -234,7 +240,7 @@ class ProoflineClient(Operations):
             timeout=httpx2.Timeout(timeout),
             follow_redirects=False,
             trust_env=False,
-            transport=_transport.RetryTransport(self._api.token, timeout),
+            transport=_transport.RetryTransport(self._api.token, timeout, tunnel),
         )
         self._api.set_httpx_client(self._http)
         self.mcp = McpClient(self._http)
@@ -591,9 +597,11 @@ class AsyncProoflineClient(AsyncOperations):
         *,
         base_url: str = "https://proofline.sh",
         timeout: float = 30,
+        proxy: str | None = None,
     ) -> None:
         self._api = _configuration(token, base_url, timeout)
         self._base_url = _transport.base_url(base_url)
+        tunnel = _proxy.select(proxy, self._base_url, os.environ)
         self._http = httpx2.AsyncClient(
             base_url=self._base_url,
             auth=_transport.BearerAuth(self._api.token),
@@ -604,7 +612,7 @@ class AsyncProoflineClient(AsyncOperations):
             timeout=httpx2.Timeout(timeout),
             follow_redirects=False,
             trust_env=False,
-            transport=_transport.AsyncRetryTransport(self._api.token, timeout),
+            transport=_transport.AsyncRetryTransport(self._api.token, timeout, tunnel),
         )
         self._api.set_async_httpx_client(self._http)
         self.mcp = AsyncMcpClient(self._http)
