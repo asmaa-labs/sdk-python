@@ -93,8 +93,8 @@ jobs:
           page = json.load(open(sys.argv[1]))
           print(f"CLI: read a page of {len(page.get('items', []))} reviews")
           PY
+      - name: The proxy carried the connections to Proofline
+        run: sudo grep -q 'CONNECT proofline.sh:443' /var/log/tinyproxy/e2e.log
       - name: What the proxy saw
         if: always()
-        run: |
-          sudo grep -i 'connect' /var/log/tinyproxy/e2e.log || true
-          sudo grep -q 'proofline.sh:443' /var/log/tinyproxy/e2e.log
+        run: sudo grep -i 'connect' /var/log/tinyproxy/e2e.log 2>/dev/null || echo "No proxy log."
